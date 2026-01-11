@@ -1,20 +1,23 @@
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, filedialog, simpledialog
 import pygame
 import os
 import glob
+import time
+import psutil # NEW: System Monitoring
+from datetime import datetime
+from PIL import Image, ImageTk, ImageSequence 
 
 # ================= SETUP =================
 MUSIC_FILE = "music.mp3"
 pygame.mixer.init()
 music_playing = False
-is_moving = False
+EDIT_MODE = False
 
-# ================= WINDOW =================
+# ================= WINDOW CONFIG =================
 root = tk.Tk()
 root.configure(bg="#0b0f1a")
-root.overrideredirect(True) # Borderless
-
+root.overrideredirect(True)
 SCREEN_W = root.winfo_screenwidth()
 SCREEN_H = root.winfo_screenheight()
 root.geometry(f"{SCREEN_W}x{SCREEN_H}+0+0")
@@ -26,287 +29,308 @@ root.bind("<Escape>", lambda e: root.destroy())
 canvas = tk.Canvas(root, bg="#0b0f1a", highlightthickness=0)
 canvas.pack(fill="both", expand=True)
 
-# ================= ASSETS =================
-# Character
-CHAR_SIZE = 45
-char_x = 100
-char_y = SCREEN_H - 200
-char = canvas.create_oval(
-    char_x, char_y, char_x + CHAR_SIZE, char_y + CHAR_SIZE,
-    fill="#ff006e", outline=""
-)
+# Placeholder for Wallpaper
+wallpaper_id = None
+wallpaper_img = None 
 
-# Music Station
-player_x = SCREEN_W // 2 - 90
-player_y = SCREEN_H - 120
-canvas.create_rectangle(
-    player_x, player_y, player_x + 180, player_y + 60,
-    fill="#14182b", outline=""
-)
-canvas.create_text(
-    player_x + 90, player_y + 30,
-    text="🎵 Music Player", fill="white", font=("Segoe UI", 11, "bold")
-)
-
-# ================= LOGIC & ANIMATION =================
-def bot_msg(text):
-    chat_log.config(state="normal")
-    chat_log.insert("end", f"Bot: {text}\n")
-    chat_log.config(state="disabled")
-    chat_log.see("end")
-
-def user_msg(text):
-    chat_log.config(state="normal")
-    chat_log.insert("end", f"You: {text}\n")
-    chat_log.config(state="disabled")
-    chat_log.see("end")
-
-def play_music():
-    global music_playing
-    if not os.path.exists(MUSIC_FILE):
-        bot_msg(f"Missing {MUSIC_FILE}")
-        return
-    if not music_playing:
-        pygame.mixer.music.load(MUSIC_FILE)
-        pygame.mixer.music.play(-1)
-        music_playing = True
-        bot_msg("Playing music 🎶")
-
-def pause_music():
-    global music_playing
-    if music_playing:
-        pygame.mixer.music.pause()
-        music_playing = False
-        bot_msg("Music paused ⏸")
-
-def move_character(tx, ty, action=None):
-    global char_x, char_y, is_moving
-    if is_moving:
-        bot_msg("Wait, I'm moving!")
-        return
-
-    is_moving = True
-    step = 8
-
-    def animate():
-        global char_x, char_y, is_moving
-        moved = False
-        diff_x = tx - char_x
-        diff_y = ty - char_y
-
-        if abs(diff_x) > step:
-            dx = step if diff_x > 0 else -step
-            char_x += dx
-            canvas.move(char, dx, 0)
-            moved = True
-        
-        if abs(diff_y) > step:
-            dy = step if diff_y > 0 else -step
-            char_y += dy
-            canvas.move(char, 0, dy)
-            moved = True
-
-        if moved:
-            root.after(10, animate)
-        else:
-            is_moving = False
-            if action: action()
-
-    animate()
-
-# ================= DRAGGABLE APP ICONS =================
-class DesktopIcon:
-    def __init__(self, canvas, name, path, x, y):
+# ================= OBJECT ENGINE (THE BRAIN) =================
+class SmartObject:
+    def __init__(self, canvas, x, y, size=50):
         self.canvas = canvas
-        self.path = path
-        self.name = name
-        self.font_size = 14
-        
-        # Create visual elements
-        # 1. The Icon (Emoji)
-        self.icon_id = canvas.create_text(
-            x, y, text="🚀", font=("Segoe UI", self.font_size * 2), fill="white"
-        )
-        # 2. The Text Label
-        self.text_id = canvas.create_text(
-            x, y + 30, text=name, font=("Segoe UI", 9), fill="#cccccc"
-        )
-        
-        # Group them for easy reference
-        self.ids = [self.icon_id, self.text_id]
-
-        # Bind events
-        for item in self.ids:
-            canvas.tag_bind(item, "<Button-1>", self.on_click)          # Select/Resize
-            canvas.tag_bind(item, "<Double-Button-1>", self.on_double)  # Open
-            canvas.tag_bind(item, "<B1-Motion>", self.on_drag)          # Move
-
-        # State for dragging
+        self.x = x
+        self.y = y
+        self.size = size
+        self.ids = [] 
         self.drag_data = {"x": 0, "y": 0}
+        self.frames = [] # For GIFs
+        self.anim_job = None
+        self.update_job = None # For Widgets
+
+    def bind_events(self):
+        for item in self.ids:
+            self.canvas.tag_bind(item, "<Button-1>", self.on_click)
+            self.canvas.tag_bind(item, "<B1-Motion>", self.on_drag)
+            self.canvas.tag_bind(item, "<ButtonRelease-1>", self.on_drop)
 
     def on_click(self, event):
-        # 1. Record start position for drag
         self.drag_data["x"] = event.x
         self.drag_data["y"] = event.y
-        
-        # 2. Show Resize Controls
-        show_resize_controls(self)
+        if EDIT_MODE: select_object(self)
+        else: self.on_action()
 
     def on_drag(self, event):
-        # Hide controls while dragging
+        if not EDIT_MODE: return
         resize_frame.place_forget()
-        
-        # Calculate distance moved
         dx = event.x - self.drag_data["x"]
         dy = event.y - self.drag_data["y"]
-        
-        # Move all parts of the icon
         for item in self.ids:
             self.canvas.move(item, dx, dy)
-            
-        # Update drag data
         self.drag_data["x"] = event.x
         self.drag_data["y"] = event.y
+        
+        # Update internal coords
+        c = self.canvas.coords(self.ids[0])
+        self.x, self.y = c[0], c[1]
 
-    def on_double(self, event):
-        bot_msg(f"Opening {self.name}... 📂")
-        try:
-            os.startfile(self.path)
-        except Exception as e:
-            bot_msg(f"Error: {e}")
+    def on_drop(self, event):
+        if EDIT_MODE: select_object(self)
 
     def resize(self, delta):
-        # Limit size
-        if self.font_size + delta < 8 or self.font_size + delta > 40:
-            return
-            
-        self.font_size += delta
-        # Update Icon Size
-        self.canvas.itemconfig(self.icon_id, font=("Segoe UI", int(self.font_size * 2)))
-        # Update Label distance (move text down if icon gets bigger)
-        # (For simplicity, we just resize the icon here)
+        self.size += delta
+        if self.size < 30: self.size = 30
+        self.redraw()
+        select_object(self)
 
-# --- RESIZE FLOATING TOOLBAR ---
-resize_frame = tk.Frame(root, bg="#ff006e", padx=2, pady=2)
-current_selected_app = None
+    def delete(self):
+        self.stop_animation()
+        if self.update_job: root.after_cancel(self.update_job)
+        for item in self.ids: self.canvas.delete(item)
+        resize_frame.place_forget()
 
-def increase_size():
-    if current_selected_app: current_selected_app.resize(2)
+    # --- IMAGE & GIF LOGIC ---
+    def set_image(self, path):
+        self.stop_animation()
+        try:
+            pil_img = Image.open(path)
+            if path.lower().endswith(".gif") and getattr(pil_img, "is_animated", False):
+                self.original_gif_path = path 
+                self.reload_gif()
+            else:
+                pil_img = pil_img.resize((self.size, self.size), Image.Resampling.LANCZOS)
+                self.image_ref = ImageTk.PhotoImage(pil_img)
+                self.redraw(use_image_ref=True)
+        except Exception as e:
+            print(f"Error: {e}")
 
-def decrease_size():
-    if current_selected_app: current_selected_app.resize(-2)
+    def reload_gif(self):
+        try:
+            pil_img = Image.open(self.original_gif_path)
+            self.frames = [ImageTk.PhotoImage(f.resize((self.size, self.size))) for f in ImageSequence.Iterator(pil_img)]
+            self.frame_index = 0
+            self.animate()
+        except: pass
 
-btn_plus = tk.Button(resize_frame, text="+", command=increase_size, font=("Consolas", 8, "bold"), width=3, bg="white", relief="flat")
-btn_plus.pack(side="left", padx=1)
-btn_minus = tk.Button(resize_frame, text="-", command=decrease_size, font=("Consolas", 8, "bold"), width=3, bg="white", relief="flat")
-btn_minus.pack(side="left", padx=1)
+    def animate(self):
+        if not self.frames: return
+        self.canvas.itemconfig(self.main_id, image=self.frames[self.frame_index])
+        self.frame_index = (self.frame_index + 1) % len(self.frames)
+        self.anim_job = root.after(100, self.animate)
 
-def show_resize_controls(app_obj):
-    global current_selected_app
-    current_selected_app = app_obj
+    def stop_animation(self):
+        if self.anim_job: root.after_cancel(self.anim_job)
+        self.frames = []
+
+    def redraw(self, use_image_ref=False): pass
+    def on_action(self): pass
+
+# ================= WIDGET: APP ICON =================
+class AppIcon(SmartObject):
+    def __init__(self, canvas, name, path, x, y):
+        super().__init__(canvas, x, y, size=45)
+        self.name = name
+        self.file_path = path
+        self.redraw()
+
+    def redraw(self, use_image_ref=False):
+        for item in self.ids: self.canvas.delete(item)
+        
+        if use_image_ref:
+            self.main_id = self.canvas.create_image(self.x, self.y, image=self.image_ref)
+        else:
+            self.main_id = self.canvas.create_text(self.x, self.y, text="🚀", font=("Segoe UI", int(self.size/1.5)), fill="white")
+
+        self.text_id = self.canvas.create_text(self.x, self.y + 35, text=self.name, font=("Segoe UI", 9), fill="#ccc")
+        self.ids = [self.main_id, self.text_id]
+        self.bind_events()
+
+    def on_action(self):
+        try: os.startfile(self.file_path)
+        except: pass
+
+# ================= WIDGET: CLOCK =================
+class ClockWidget(SmartObject):
+    def __init__(self, canvas, x, y):
+        super().__init__(canvas, x, y, size=30) # Size here controls font size
+        self.redraw()
+        self.update_time()
+
+    def redraw(self, use_image_ref=False):
+        for item in self.ids: self.canvas.delete(item)
+        
+        # Background Box
+        self.box_id = self.canvas.create_rectangle(
+            self.x, self.y, self.x+200, self.y+80, fill="#111", outline="#00ff9d", width=2
+        )
+        # Time Text
+        self.text_id = self.canvas.create_text(
+            self.x+100, self.y+25, text="00:00", font=("Consolas", self.size, "bold"), fill="white"
+        )
+        # Date Text
+        self.date_id = self.canvas.create_text(
+            self.x+100, self.y+60, text="...", font=("Segoe UI", 10), fill="#aaa"
+        )
+        
+        self.ids = [self.box_id, self.text_id, self.date_id]
+        self.bind_events()
+
+    def update_time(self):
+        now = datetime.now()
+        t = now.strftime("%H:%M:%S")
+        d = now.strftime("%A, %d %b %Y")
+        self.canvas.itemconfig(self.text_id, text=t)
+        self.canvas.itemconfig(self.date_id, text=d)
+        self.update_job = root.after(1000, self.update_time)
+
+# ================= WIDGET: CPU/RAM STATS =================
+class SysStatsWidget(SmartObject):
+    def __init__(self, canvas, x, y):
+        super().__init__(canvas, x, y, size=14)
+        self.redraw()
+        self.update_stats()
+
+    def redraw(self, use_image_ref=False):
+        for item in self.ids: self.canvas.delete(item)
+        
+        # Background
+        self.box_id = self.canvas.create_rectangle(
+            self.x, self.y, self.x+160, self.y+90, fill="#1a0b0b", outline="#ff006e", width=2
+        )
+        # Labels
+        self.cpu_id = self.canvas.create_text(self.x+80, self.y+25, text="CPU: 0%", font=("Consolas", 14), fill="#ff006e")
+        self.ram_id = self.canvas.create_text(self.x+80, self.y+55, text="RAM: 0%", font=("Consolas", 14), fill="#00d4ff")
+        
+        self.ids = [self.box_id, self.cpu_id, self.ram_id]
+        self.bind_events()
+
+    def update_stats(self):
+        cpu = psutil.cpu_percent()
+        ram = psutil.virtual_memory().percent
+        self.canvas.itemconfig(self.cpu_id, text=f"CPU: {cpu}%")
+        self.canvas.itemconfig(self.ram_id, text=f"RAM: {ram}%")
+        self.update_job = root.after(2000, self.update_stats)
+
+# ================= WIDGET: PHOTO/ASSISTANT =================
+class PhotoWidget(SmartObject):
+    def __init__(self, canvas, x, y, is_assistant=False):
+        super().__init__(canvas, x, y, size=100 if not is_assistant else 60)
+        self.is_assistant = is_assistant
+        self.redraw()
+
+    def redraw(self, use_image_ref=False):
+        if not hasattr(self, 'main_id'): pass
+        else:
+            for item in self.ids: self.canvas.delete(item)
+
+        if use_image_ref:
+            self.main_id = self.canvas.create_image(self.x, self.y, image=self.image_ref)
+        elif self.frames:
+            self.main_id = self.canvas.create_image(self.x, self.y, image=self.frames[0])
+        else:
+            if self.is_assistant:
+                self.main_id = self.canvas.create_oval(self.x-30, self.y-30, self.x+30, self.y+30, fill="#ff006e")
+            else:
+                self.main_id = self.canvas.create_rectangle(self.x-50, self.y-50, self.x+50, self.y+50, fill="#222", outline="white", dash=(2,2))
+        
+        self.ids = [self.main_id]
+        self.bind_events()
+        if self.frames: self.animate()
+
+    def on_action(self):
+        if self.is_assistant: bot_msg("Listening...")
+
+# ================= UI CONTROLS =================
+current_selection = None
+resize_frame = tk.Frame(root, bg="#00ff9d", padx=5, pady=5)
+
+def select_object(obj):
+    global current_selection
+    current_selection = obj
+    c = canvas.coords(obj.ids[0])
+    if not c: return
+    # If shape (4 coords) vs image (2 coords)
+    y_off = -60 if len(c) == 2 else -20
+    resize_frame.place(x=c[0], y=c[1] + y_off)
+    resize_frame.lift()
+
+def set_wallpaper():
+    global wallpaper_img, wallpaper_id
+    path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg;*.png;*.jpeg")])
+    if path:
+        img = Image.open(path)
+        img = img.resize((SCREEN_W, SCREEN_H), Image.Resampling.LANCZOS)
+        wallpaper_img = ImageTk.PhotoImage(img)
+        
+        if wallpaper_id: canvas.delete(wallpaper_id)
+        wallpaper_id = canvas.create_image(0, 0, image=wallpaper_img, anchor="nw")
+        canvas.tag_lower(wallpaper_id) # Send to back
+
+def add_new_app():
+    path = filedialog.askopenfilename(title="Select .exe or Shortcut", filetypes=[("Executables", "*.exe;*.lnk;*.url")])
+    if path:
+        name = os.path.splitext(os.path.basename(path))[0]
+        AppIcon(canvas, name, path, SCREEN_W//2, SCREEN_H//2)
+
+def delete_current():
+    global current_selection
+    if current_selection:
+        current_selection.delete()
+        current_selection = None
+
+# Edit Toolbar
+tk.Button(resize_frame, text="IMG", command=lambda: current_selection.set_image(filedialog.askopenfilename()), bg="white").pack(side="left", padx=2)
+tk.Button(resize_frame, text="+", command=lambda: current_selection.resize(10), bg="white").pack(side="left")
+tk.Button(resize_frame, text="-", command=lambda: current_selection.resize(-10), bg="white").pack(side="left")
+tk.Button(resize_frame, text="DEL", command=delete_current, bg="#ff4444", fg="white").pack(side="left", padx=5)
+
+def toggle_edit():
+    global EDIT_MODE
+    EDIT_MODE = not EDIT_MODE
     
-    # Get current position of the icon
-    coords = canvas.coords(app_obj.icon_id)
-    if coords:
-        # Place the floating toolbar slightly above the icon
-        toolbar_x = coords[0] - 25 
-        toolbar_y = coords[1] - 50 
-        resize_frame.place(x=toolbar_x, y=toolbar_y)
-        resize_frame.lift()
-
-# --- APP LOADING LOGIC ---
-def load_apps_to_canvas():
-    paths = [
-        os.path.join(os.path.expanduser("~"), "Desktop"),
-        os.path.join(os.environ.get('PUBLIC', 'C:\\Users\\Public'), "Desktop")
-    ]
-    
-    # Grid positioning variables
-    start_x = 50
-    start_y = 50
-    current_x = start_x
-    current_y = start_y
-    
-    for folder in paths:
-        if os.path.exists(folder):
-            files = glob.glob(os.path.join(folder, "*.lnk")) + glob.glob(os.path.join(folder, "*.url"))
-            for file in files:
-                name = os.path.splitext(os.path.basename(file))[0]
-                
-                # Create the Draggable Icon Object
-                DesktopIcon(canvas, name, file, current_x, current_y)
-                
-                # Grid Logic
-                current_y += 100
-                if current_y > SCREEN_H - 150:
-                    current_y = start_y
-                    current_x += 100
-
-# ================= CHAT UI =================
-chat_frame = tk.Frame(root, bg="#14182b", bd=1, relief="solid")
-chat_frame.place(relx=0.72, rely=0.60, relwidth=0.26, relheight=0.35)
-
-input_frame = tk.Frame(chat_frame, bg="#1f243d", pady=5, padx=5)
-input_frame.pack(side="bottom", fill="x")
-
-header = tk.Label(chat_frame, text="Chat Assistant", bg="#0f1221", fg="white", font=("Segoe UI", 10, "bold"), pady=5)
-header.pack(side="top", fill="x")
-
-chat_log = scrolledtext.ScrolledText(
-    chat_frame, bg="#14182b", fg="#e0e0e0",
-    font=("Segoe UI", 10), wrap="word", relief="flat", bd=0, highlightthickness=0
-)
-chat_log.pack(side="top", fill="both", expand=True, padx=10, pady=5)
-chat_log.config(state="disabled")
-
-entry = tk.Entry(
-    input_frame, bg="#1f243d", fg="grey",
-    insertbackground="white", relief="flat", font=("Segoe UI", 11)
-)
-entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
-
-def on_entry_click(event):
-    if entry.get() == "Type a message...":
-        entry.delete(0, "end")
-        entry.config(fg="white")
-
-def on_focus_out(event):
-    if entry.get() == "":
-        entry.insert(0, "Type a message...")
-        entry.config(fg="grey")
-
-entry.insert(0, "Type a message...")
-entry.bind('<FocusIn>', on_entry_click)
-entry.bind('<FocusOut>', on_focus_out)
-
-def handle_send(event=None):
-    msg = entry.get().strip()
-    if not msg or msg == "Type a message...": return
-    entry.delete(0, "end")
-    user_msg(msg)
-    msg = msg.lower()
-
-    if "play" in msg:
-        bot_msg("On it 🎵")
-        move_character(player_x + 80, player_y - 50, play_music)
-    elif "pause" in msg:
-        bot_msg("Pausing ⏸")
-        move_character(player_x + 80, player_y - 50, pause_music)
-    elif "exit" in msg:
-        root.destroy()
+    if EDIT_MODE:
+        top_bar.place(x=0, y=0, relwidth=1, height=40)
+        bot_msg("EDIT MODE: Add apps, widgets, or change wallpaper.")
     else:
-        bot_msg("Commands: play, pause, exit")
+        top_bar.place_forget()
+        resize_frame.place_forget()
+        bot_msg("Desktop Locked.")
 
-send_btn = tk.Button(
-    input_frame, text="SEND", bg="#ff006e", fg="white",
-    font=("Segoe UI", 9, "bold"), relief="flat",
-    activebackground="#d6005c", activeforeground="white",
-    command=handle_send
-)
-send_btn.pack(side="right", padx=5)
-entry.bind("<Return>", handle_send)
+# Top Control Bar (Visible only in Edit Mode)
+top_bar = tk.Frame(root, bg="#333")
+tk.Button(top_bar, text="DONE", command=toggle_edit, bg="#00ff9d", font=("bold")).pack(side="left", padx=10, pady=5)
+tk.Button(top_bar, text="Set Wallpaper", command=set_wallpaper, bg="white").pack(side="left", padx=5)
+tk.Button(top_bar, text="+ App", command=add_new_app, bg="white").pack(side="left", padx=5)
+tk.Button(top_bar, text="+ Photo", command=lambda: PhotoWidget(canvas, 300, 300), bg="white").pack(side="left", padx=5)
+tk.Button(top_bar, text="+ Clock", command=lambda: ClockWidget(canvas, 400, 300), bg="white").pack(side="left", padx=5)
+tk.Button(top_bar, text="+ Sys Stats", command=lambda: SysStatsWidget(canvas, 500, 300), bg="white").pack(side="left", padx=5)
 
-# ================= STARTUP =================
-load_apps_to_canvas()
-bot_msg("System Online. Desktop Apps Loaded.")
+# Main "Start" Button (Always visible)
+start_btn = tk.Button(root, text="⚙ Settings", command=toggle_edit, bg="#222", fg="white")
+start_btn.place(x=10, y=10)
+
+# ================= CHAT =================
+chat_frame = tk.Frame(root, bg="#14182b", relief="solid", bd=1)
+chat_frame.place(relx=0.75, rely=0.6, relwidth=0.24, relheight=0.35)
+chat_log = scrolledtext.ScrolledText(chat_frame, bg="#14182b", fg="white", height=10)
+chat_log.pack(fill="both", expand=True)
+entry = tk.Entry(chat_frame, bg="#222", fg="white")
+entry.pack(fill="x")
+
+def bot_msg(txt):
+    chat_log.insert("end", f"Bot: {txt}\n")
+    chat_log.see("end")
+
+def send(e):
+    msg = entry.get()
+    entry.delete(0, "end")
+    if msg == "exit": root.destroy()
+    elif "play" in msg:
+         if os.path.exists(MUSIC_FILE) and not music_playing:
+            pygame.mixer.music.load(MUSIC_FILE)
+            pygame.mixer.music.play()
+    else: bot_msg(f"Echo: {msg}")
+entry.bind("<Return>", send)
+
+# ================= RUN =================
+asst = PhotoWidget(canvas, 100, SCREEN_H-150, is_assistant=True)
+bot_msg("Welcome. Click 'Settings' to customize.")
 root.mainloop()

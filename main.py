@@ -1,12 +1,9 @@
 import tkinter as tk
-from tkinter import scrolledtext, filedialog, simpledialog
+from tkinter import scrolledtext, filedialog
 import pygame
 import os
 import glob
-import time
-import psutil # NEW: System Monitoring
-from datetime import datetime
-from PIL import Image, ImageTk, ImageSequence 
+from PIL import Image, ImageTk
 
 # ================= SETUP =================
 MUSIC_FILE = "music.mp3"
@@ -14,323 +11,268 @@ pygame.mixer.init()
 music_playing = False
 EDIT_MODE = False
 
-# ================= WINDOW CONFIG =================
+# ================= WINDOW =================
 root = tk.Tk()
 root.configure(bg="#0b0f1a")
 root.overrideredirect(True)
 SCREEN_W = root.winfo_screenwidth()
 SCREEN_H = root.winfo_screenheight()
 root.geometry(f"{SCREEN_W}x{SCREEN_H}+0+0")
-
-# Exit keys
 root.bind("<Escape>", lambda e: root.destroy())
 
-# ================= CANVAS =================
 canvas = tk.Canvas(root, bg="#0b0f1a", highlightthickness=0)
 canvas.pack(fill="both", expand=True)
 
-# Placeholder for Wallpaper
-wallpaper_id = None
-wallpaper_img = None 
-
-# ================= OBJECT ENGINE (THE BRAIN) =================
-class SmartObject:
-    def __init__(self, canvas, x, y, size=50):
+# ================= ANIMATION ENGINE =================
+class AnimatedAssistant:
+    def __init__(self, canvas, x, y):
         self.canvas = canvas
         self.x = x
         self.y = y
-        self.size = size
-        self.ids = [] 
-        self.drag_data = {"x": 0, "y": 0}
-        self.frames = [] # For GIFs
-        self.anim_job = None
-        self.update_job = None # For Widgets
-
-    def bind_events(self):
-        for item in self.ids:
-            self.canvas.tag_bind(item, "<Button-1>", self.on_click)
-            self.canvas.tag_bind(item, "<B1-Motion>", self.on_drag)
-            self.canvas.tag_bind(item, "<ButtonRelease-1>", self.on_drop)
-
-    def on_click(self, event):
-        self.drag_data["x"] = event.x
-        self.drag_data["y"] = event.y
-        if EDIT_MODE: select_object(self)
-        else: self.on_action()
-
-    def on_drag(self, event):
-        if not EDIT_MODE: return
-        resize_frame.place_forget()
-        dx = event.x - self.drag_data["x"]
-        dy = event.y - self.drag_data["y"]
-        for item in self.ids:
-            self.canvas.move(item, dx, dy)
-        self.drag_data["x"] = event.x
-        self.drag_data["y"] = event.y
+        self.size = 80
         
-        # Update internal coords
-        c = self.canvas.coords(self.ids[0])
-        self.x, self.y = c[0], c[1]
-
-    def on_drop(self, event):
-        if EDIT_MODE: select_object(self)
-
-    def resize(self, delta):
-        self.size += delta
-        if self.size < 30: self.size = 30
-        self.redraw()
-        select_object(self)
-
-    def delete(self):
-        self.stop_animation()
-        if self.update_job: root.after_cancel(self.update_job)
-        for item in self.ids: self.canvas.delete(item)
-        resize_frame.place_forget()
-
-    # --- IMAGE & GIF LOGIC ---
-    def set_image(self, path):
-        self.stop_animation()
-        try:
-            pil_img = Image.open(path)
-            if path.lower().endswith(".gif") and getattr(pil_img, "is_animated", False):
-                self.original_gif_path = path 
-                self.reload_gif()
-            else:
-                pil_img = pil_img.resize((self.size, self.size), Image.Resampling.LANCZOS)
-                self.image_ref = ImageTk.PhotoImage(pil_img)
-                self.redraw(use_image_ref=True)
-        except Exception as e:
-            print(f"Error: {e}")
-
-    def reload_gif(self):
-        try:
-            pil_img = Image.open(self.original_gif_path)
-            self.frames = [ImageTk.PhotoImage(f.resize((self.size, self.size))) for f in ImageSequence.Iterator(pil_img)]
-            self.frame_index = 0
-            self.animate()
-        except: pass
-
-    def animate(self):
-        if not self.frames: return
-        self.canvas.itemconfig(self.main_id, image=self.frames[self.frame_index])
-        self.frame_index = (self.frame_index + 1) % len(self.frames)
-        self.anim_job = root.after(100, self.animate)
-
-    def stop_animation(self):
-        if self.anim_job: root.after_cancel(self.anim_job)
-        self.frames = []
-
-    def redraw(self, use_image_ref=False): pass
-    def on_action(self): pass
-
-# ================= WIDGET: APP ICON =================
-class AppIcon(SmartObject):
-    def __init__(self, canvas, name, path, x, y):
-        super().__init__(canvas, x, y, size=45)
-        self.name = name
-        self.file_path = path
-        self.redraw()
-
-    def redraw(self, use_image_ref=False):
-        for item in self.ids: self.canvas.delete(item)
+        # Sprite Storage
+        # Format: {"idle": [img1, img2], "left": [img1, img2]...}
+        self.sprites = {
+            "idle": [], "left": [], "right": [], "jump": [], "wave": []
+        }
+        self.current_action = "idle"
+        self.frame_index = 0
+        self.is_moving = False
         
-        if use_image_ref:
-            self.main_id = self.canvas.create_image(self.x, self.y, image=self.image_ref)
-        else:
-            self.main_id = self.canvas.create_text(self.x, self.y, text="🚀", font=("Segoe UI", int(self.size/1.5)), fill="white")
-
-        self.text_id = self.canvas.create_text(self.x, self.y + 35, text=self.name, font=("Segoe UI", 9), fill="#ccc")
-        self.ids = [self.main_id, self.text_id]
-        self.bind_events()
-
-    def on_action(self):
-        try: os.startfile(self.file_path)
-        except: pass
-
-# ================= WIDGET: CLOCK =================
-class ClockWidget(SmartObject):
-    def __init__(self, canvas, x, y):
-        super().__init__(canvas, x, y, size=30) # Size here controls font size
-        self.redraw()
-        self.update_time()
-
-    def redraw(self, use_image_ref=False):
-        for item in self.ids: self.canvas.delete(item)
-        
-        # Background Box
-        self.box_id = self.canvas.create_rectangle(
-            self.x, self.y, self.x+200, self.y+80, fill="#111", outline="#00ff9d", width=2
-        )
-        # Time Text
-        self.text_id = self.canvas.create_text(
-            self.x+100, self.y+25, text="00:00", font=("Consolas", self.size, "bold"), fill="white"
-        )
-        # Date Text
-        self.date_id = self.canvas.create_text(
-            self.x+100, self.y+60, text="...", font=("Segoe UI", 10), fill="#aaa"
-        )
-        
-        self.ids = [self.box_id, self.text_id, self.date_id]
-        self.bind_events()
-
-    def update_time(self):
-        now = datetime.now()
-        t = now.strftime("%H:%M:%S")
-        d = now.strftime("%A, %d %b %Y")
-        self.canvas.itemconfig(self.text_id, text=t)
-        self.canvas.itemconfig(self.date_id, text=d)
-        self.update_job = root.after(1000, self.update_time)
-
-# ================= WIDGET: CPU/RAM STATS =================
-class SysStatsWidget(SmartObject):
-    def __init__(self, canvas, x, y):
-        super().__init__(canvas, x, y, size=14)
-        self.redraw()
-        self.update_stats()
-
-    def redraw(self, use_image_ref=False):
-        for item in self.ids: self.canvas.delete(item)
-        
-        # Background
-        self.box_id = self.canvas.create_rectangle(
-            self.x, self.y, self.x+160, self.y+90, fill="#1a0b0b", outline="#ff006e", width=2
-        )
-        # Labels
-        self.cpu_id = self.canvas.create_text(self.x+80, self.y+25, text="CPU: 0%", font=("Consolas", 14), fill="#ff006e")
-        self.ram_id = self.canvas.create_text(self.x+80, self.y+55, text="RAM: 0%", font=("Consolas", 14), fill="#00d4ff")
-        
-        self.ids = [self.box_id, self.cpu_id, self.ram_id]
-        self.bind_events()
-
-    def update_stats(self):
-        cpu = psutil.cpu_percent()
-        ram = psutil.virtual_memory().percent
-        self.canvas.itemconfig(self.cpu_id, text=f"CPU: {cpu}%")
-        self.canvas.itemconfig(self.ram_id, text=f"RAM: {ram}%")
-        self.update_job = root.after(2000, self.update_stats)
-
-# ================= WIDGET: PHOTO/ASSISTANT =================
-class PhotoWidget(SmartObject):
-    def __init__(self, canvas, x, y, is_assistant=False):
-        super().__init__(canvas, x, y, size=100 if not is_assistant else 60)
-        self.is_assistant = is_assistant
-        self.redraw()
-
-    def redraw(self, use_image_ref=False):
-        if not hasattr(self, 'main_id'): pass
-        else:
-            for item in self.ids: self.canvas.delete(item)
-
-        if use_image_ref:
-            self.main_id = self.canvas.create_image(self.x, self.y, image=self.image_ref)
-        elif self.frames:
-            self.main_id = self.canvas.create_image(self.x, self.y, image=self.frames[0])
-        else:
-            if self.is_assistant:
-                self.main_id = self.canvas.create_oval(self.x-30, self.y-30, self.x+30, self.y+30, fill="#ff006e")
-            else:
-                self.main_id = self.canvas.create_rectangle(self.x-50, self.y-50, self.x+50, self.y+50, fill="#222", outline="white", dash=(2,2))
-        
+        # Initial Draw
+        self.main_id = canvas.create_oval(x, y, x+50, y+50, fill="#ff006e", outline="")
         self.ids = [self.main_id]
         self.bind_events()
-        if self.frames: self.animate()
-
-    def on_action(self):
-        if self.is_assistant: bot_msg("Listening...")
-
-# ================= UI CONTROLS =================
-current_selection = None
-resize_frame = tk.Frame(root, bg="#00ff9d", padx=5, pady=5)
-
-def select_object(obj):
-    global current_selection
-    current_selection = obj
-    c = canvas.coords(obj.ids[0])
-    if not c: return
-    # If shape (4 coords) vs image (2 coords)
-    y_off = -60 if len(c) == 2 else -20
-    resize_frame.place(x=c[0], y=c[1] + y_off)
-    resize_frame.lift()
-
-def set_wallpaper():
-    global wallpaper_img, wallpaper_id
-    path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg;*.png;*.jpeg")])
-    if path:
-        img = Image.open(path)
-        img = img.resize((SCREEN_W, SCREEN_H), Image.Resampling.LANCZOS)
-        wallpaper_img = ImageTk.PhotoImage(img)
         
-        if wallpaper_id: canvas.delete(wallpaper_id)
-        wallpaper_id = canvas.create_image(0, 0, image=wallpaper_img, anchor="nw")
-        canvas.tag_lower(wallpaper_id) # Send to back
+        # Start Animation Loop
+        self.animate()
 
-def add_new_app():
-    path = filedialog.askopenfilename(title="Select .exe or Shortcut", filetypes=[("Executables", "*.exe;*.lnk;*.url")])
-    if path:
-        name = os.path.splitext(os.path.basename(path))[0]
-        AppIcon(canvas, name, path, SCREEN_W//2, SCREEN_H//2)
+    def load_sprites_from_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder with Sprite Images")
+        if not folder: return
+        
+        # Helper to load a sequence
+        def load_seq(action_name):
+            frames = []
+            # Look for file_1.png, file_2.png, etc.
+            files = sorted(glob.glob(os.path.join(folder, f"{action_name}_*.png")))
+            if not files: 
+                # Try simple format: action1.png, action2.png
+                files = sorted(glob.glob(os.path.join(folder, f"{action_name}*.png")))
+            
+            for f in files:
+                try:
+                    img = Image.open(f).resize((self.size, self.size), Image.Resampling.NEAREST)
+                    frames.append(ImageTk.PhotoImage(img))
+                except: pass
+            
+            if frames: 
+                self.sprites[action_name] = frames
+                print(f"Loaded {len(frames)} frames for {action_name}")
 
-def delete_current():
-    global current_selection
-    if current_selection:
-        current_selection.delete()
-        current_selection = None
+        # Load all states
+        load_seq("idle")
+        load_seq("left")
+        load_seq("right")
+        load_seq("jump")
+        load_seq("wave")
+        
+        # Switch to image mode if we found sprites
+        if self.sprites["idle"]:
+            self.canvas.delete(self.main_id)
+            self.main_id = self.canvas.create_image(self.x, self.y, image=self.sprites["idle"][0])
+            self.ids = [self.main_id]
+            self.bind_events()
 
-# Edit Toolbar
-tk.Button(resize_frame, text="IMG", command=lambda: current_selection.set_image(filedialog.askopenfilename()), bg="white").pack(side="left", padx=2)
-tk.Button(resize_frame, text="+", command=lambda: current_selection.resize(10), bg="white").pack(side="left")
-tk.Button(resize_frame, text="-", command=lambda: current_selection.resize(-10), bg="white").pack(side="left")
-tk.Button(resize_frame, text="DEL", command=delete_current, bg="#ff4444", fg="white").pack(side="left", padx=5)
+    def bind_events(self):
+        self.canvas.tag_bind(self.main_id, "<Button-1>", self.on_click)
+        self.canvas.tag_bind(self.main_id, "<B1-Motion>", self.on_drag)
 
-def toggle_edit():
-    global EDIT_MODE
-    EDIT_MODE = not EDIT_MODE
+    def animate(self):
+        # 1. Get frames for current action
+        frames = self.sprites.get(self.current_action)
+        
+        # 2. Update Image if frames exist
+        if frames:
+            self.frame_index = (self.frame_index + 1) % len(frames)
+            current_img = frames[self.frame_index]
+            self.canvas.itemconfig(self.main_id, image=current_img)
+        
+        # 3. Loop (Speed: 100ms)
+        root.after(100, self.animate)
+
+    def walk_to(self, tx, ty, callback=None):
+        if self.is_moving: return
+        self.is_moving = True
+        
+        def step():
+            dx, dy = 0, 0
+            moved = False
+            speed = 8
+            
+            # Determine Direction
+            if tx > self.x + speed:
+                dx = speed
+                self.current_action = "right" if self.sprites["right"] else "idle"
+                moved = True
+            elif tx < self.x - speed:
+                dx = -speed
+                self.current_action = "left" if self.sprites["left"] else "idle"
+                moved = True
+            else:
+                # X alignment done, move Y
+                if ty > self.y + speed:
+                    dy = speed
+                    moved = True
+                elif ty < self.y - speed:
+                    dy = -speed
+                    moved = True
+            
+            if moved:
+                self.x += dx
+                self.y += dy
+                self.canvas.move(self.main_id, dx, dy)
+                root.after(20, step)
+            else:
+                self.is_moving = False
+                self.current_action = "idle"
+                if callback: callback()
+
+        step()
+
+    def do_action(self, action_name):
+        # Temporarily switch action then go back to idle
+        if action_name in self.sprites and self.sprites[action_name]:
+            self.current_action = action_name
+            # Calculate duration: frames * speed
+            duration = len(self.sprites[action_name]) * 100
+            root.after(duration + 200, lambda: setattr(self, 'current_action', 'idle'))
+        else:
+            bot_msg(f"I don't have images for {action_name}!")
+
+    # Standard Dragging
+    def on_click(self, e):
+        if EDIT_MODE:
+            self.drag_start = (e.x, e.y)
+        else:
+            self.do_action("wave") # Wave when clicked!
+
+    def on_drag(self, e):
+        if not EDIT_MODE: return
+        dx = e.x - self.drag_start[0]
+        dy = e.y - self.drag_start[1]
+        self.canvas.move(self.main_id, dx, dy)
+        self.x += dx
+        self.y += dy
+        self.drag_start = (e.x, e.y)
+
+# ================= OBJECTS (Apps) =================
+class SimpleApp:
+    def __init__(self, name, path, x, y):
+        self.path = path
+        self.id = canvas.create_text(x, y, text="📂\n"+name, fill="white", font=("Segoe UI", 10), justify="center")
+        canvas.tag_bind(self.id, "<Button-1>", lambda e: self.open_app())
+        
+        # Keep reference to enable drag later if needed
+        self.drag_data = {"x":0, "y":0}
+        canvas.tag_bind(self.id, "<B1-Motion>", self.on_drag)
+        canvas.tag_bind(self.id, "<Button-1>", self.on_click)
+
+    def open_app(self):
+        if not EDIT_MODE:
+            try: os.startfile(self.path)
+            except: pass
     
-    if EDIT_MODE:
-        top_bar.place(x=0, y=0, relwidth=1, height=40)
-        bot_msg("EDIT MODE: Add apps, widgets, or change wallpaper.")
+    def on_click(self, e):
+        self.drag_data["x"] = e.x
+        self.drag_data["y"] = e.y
+
+    def on_drag(self, e):
+        if EDIT_MODE:
+            dx = e.x - self.drag_data["x"]
+            dy = e.y - self.drag_data["y"]
+            canvas.move(self.id, dx, dy)
+            self.drag_data["x"] = e.x
+            self.drag_data["y"] = e.y
+
+def load_apps():
+    desktop = os.path.join(os.environ["USERPROFILE"], "Desktop")
+    cx, cy = 50, 50
+    if os.path.exists(desktop):
+        for f in glob.glob(os.path.join(desktop, "*.lnk"))[:12]:
+            name = os.path.splitext(os.path.basename(f))[0]
+            SimpleApp(name, f, cx, cy)
+            cy += 80
+            if cy > SCREEN_H - 100:
+                cy = 50
+                cx += 80
+
+# ================= CHAT UI (TOGGLEABLE) =================
+chat_visible = True
+
+def toggle_chat():
+    global chat_visible
+    if chat_visible:
+        chat_frame.place_forget()
+        toggle_btn.config(text="💬") # Show bubble icon
+        chat_visible = False
     else:
-        top_bar.place_forget()
-        resize_frame.place_forget()
-        bot_msg("Desktop Locked.")
+        chat_frame.place(relx=0.75, rely=0.6, relwidth=0.24, relheight=0.35)
+        toggle_btn.config(text="➖") # Show minimize icon
+        chat_visible = True
 
-# Top Control Bar (Visible only in Edit Mode)
-top_bar = tk.Frame(root, bg="#333")
-tk.Button(top_bar, text="DONE", command=toggle_edit, bg="#00ff9d", font=("bold")).pack(side="left", padx=10, pady=5)
-tk.Button(top_bar, text="Set Wallpaper", command=set_wallpaper, bg="white").pack(side="left", padx=5)
-tk.Button(top_bar, text="+ App", command=add_new_app, bg="white").pack(side="left", padx=5)
-tk.Button(top_bar, text="+ Photo", command=lambda: PhotoWidget(canvas, 300, 300), bg="white").pack(side="left", padx=5)
-tk.Button(top_bar, text="+ Clock", command=lambda: ClockWidget(canvas, 400, 300), bg="white").pack(side="left", padx=5)
-tk.Button(top_bar, text="+ Sys Stats", command=lambda: SysStatsWidget(canvas, 500, 300), bg="white").pack(side="left", padx=5)
-
-# Main "Start" Button (Always visible)
-start_btn = tk.Button(root, text="⚙ Settings", command=toggle_edit, bg="#222", fg="white")
-start_btn.place(x=10, y=10)
-
-# ================= CHAT =================
+# Chat Frame
 chat_frame = tk.Frame(root, bg="#14182b", relief="solid", bd=1)
 chat_frame.place(relx=0.75, rely=0.6, relwidth=0.24, relheight=0.35)
+
 chat_log = scrolledtext.ScrolledText(chat_frame, bg="#14182b", fg="white", height=10)
 chat_log.pack(fill="both", expand=True)
 entry = tk.Entry(chat_frame, bg="#222", fg="white")
 entry.pack(fill="x")
 
+# Toggle Button (Floating outside frame)
+toggle_btn = tk.Button(root, text="➖", command=toggle_chat, bg="#ff006e", fg="white", font=("bold"))
+toggle_btn.place(relx=0.96, rely=0.56, width=30, height=30)
+
 def bot_msg(txt):
+    if not chat_visible: return # Don't print if hidden (or you could force open)
     chat_log.insert("end", f"Bot: {txt}\n")
     chat_log.see("end")
 
 def send(e):
-    msg = entry.get()
+    msg = entry.get().lower()
     entry.delete(0, "end")
-    if msg == "exit": root.destroy()
-    elif "play" in msg:
-         if os.path.exists(MUSIC_FILE) and not music_playing:
-            pygame.mixer.music.load(MUSIC_FILE)
-            pygame.mixer.music.play()
-    else: bot_msg(f"Echo: {msg}")
+    
+    if "exit" in msg: root.destroy()
+    elif "jump" in msg: 
+        bot_msg("Jumping!")
+        assistant.do_action("jump")
+    elif "come here" in msg:
+        bot_msg("Coming...")
+        assistant.walk_to(SCREEN_W//2, SCREEN_H//2)
+    elif "load sprites" in msg:
+        bot_msg("Select your folder...")
+        assistant.load_sprites_from_folder()
+    else: 
+        bot_msg(f"Echo: {msg}")
+
 entry.bind("<Return>", send)
 
+# ================= EDIT MODE TOGGLE =================
+def toggle_edit_mode():
+    global EDIT_MODE
+    EDIT_MODE = not EDIT_MODE
+    mode_btn.config(bg="#00ff9d" if EDIT_MODE else "#333", text="DONE" if EDIT_MODE else "Customize")
+    bot_msg("Edit Mode " + ("ON" if EDIT_MODE else "OFF"))
+
+mode_btn = tk.Button(root, text="Customize", command=toggle_edit_mode, bg="#333", fg="white")
+mode_btn.place(x=20, y=20)
+
 # ================= RUN =================
-asst = PhotoWidget(canvas, 100, SCREEN_H-150, is_assistant=True)
-bot_msg("Welcome. Click 'Settings' to customize.")
+load_apps()
+assistant = AnimatedAssistant(canvas, SCREEN_W//2, SCREEN_H//2)
+bot_msg("Type 'load sprites' to load images!")
+bot_msg("Type 'jump' or 'come here' to test.")
+
 root.mainloop()

@@ -1,20 +1,26 @@
 import tkinter as tk
-from tkinter import scrolledtext, filedialog
-import pygame
+from tkinter import filedialog, simpledialog, scrolledtext, messagebox, Scale
 import os
-import glob
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 
-# ================= SETUP =================
-MUSIC_FILE = "music.mp3"
-pygame.mixer.init()
-music_playing = False
-EDIT_MODE = False
+# ================= GLOBAL CONFIG =================
+SCREEN_W = 0
+SCREEN_H = 0
+ASSISTANT_ACTIVE = False
 
-# ================= WINDOW =================
+# New Data Structure:
+# ACTIONS = {
+#    "idle": { "frames": [img1, img2], "delay": 100 },
+#    "walk": { "frames": [img1, img2], "delay": 50 }
+# }
+ACTIONS = {} 
+CURRENT_ACTION = "idle"
+
+# ================= MAIN WINDOW =================
 root = tk.Tk()
-root.configure(bg="#0b0f1a")
-root.overrideredirect(True)
+root.title("Custom Assistant Engine")
+root.configure(bg="#111")
+root.overrideredirect(True) 
 SCREEN_W = root.winfo_screenwidth()
 SCREEN_H = root.winfo_screenheight()
 root.geometry(f"{SCREEN_W}x{SCREEN_H}+0+0")
@@ -23,256 +29,269 @@ root.bind("<Escape>", lambda e: root.destroy())
 canvas = tk.Canvas(root, bg="#0b0f1a", highlightthickness=0)
 canvas.pack(fill="both", expand=True)
 
-# ================= ANIMATION ENGINE =================
-class AnimatedAssistant:
-    def __init__(self, canvas, x, y):
+# ================= ASSISTANT ENGINE =================
+class Assistant:
+    def __init__(self, canvas):
         self.canvas = canvas
-        self.x = x
-        self.y = y
-        self.size = 80
-        
-        # Sprite Storage
-        # Format: {"idle": [img1, img2], "left": [img1, img2]...}
-        self.sprites = {
-            "idle": [], "left": [], "right": [], "jump": [], "wave": []
-        }
-        self.current_action = "idle"
+        self.x = SCREEN_W // 2
+        self.y = SCREEN_H // 2
+        self.main_id = None
         self.frame_index = 0
+        self.facing_right = True
         self.is_moving = False
-        
-        # Initial Draw
-        self.main_id = canvas.create_oval(x, y, x+50, y+50, fill="#ff006e", outline="")
-        self.ids = [self.main_id]
-        self.bind_events()
-        
-        # Start Animation Loop
-        self.animate()
+        self.anim_job = None
+        self.target_x = 0
+        self.target_y = 0
 
-    def load_sprites_from_folder(self):
-        folder = filedialog.askdirectory(title="Select Folder with Sprite Images")
-        if not folder: return
+    def enable(self):
+        if self.main_id: return 
+        if "idle" not in ACTIONS: self.create_placeholder()
         
-        # Helper to load a sequence
-        def load_seq(action_name):
+        # Start
+        start_data = ACTIONS["idle"]
+        self.main_id = self.canvas.create_image(self.x, self.y, image=start_data["frames"][0])
+        self.animate()
+        
+        self.canvas.tag_bind(self.main_id, "<B1-Motion>", self.drag)
+        self.canvas.tag_bind(self.main_id, "<Button-1>", self.drag_start)
+
+    def disable(self):
+        if self.main_id:
+            self.canvas.delete(self.main_id)
+            self.main_id = None
+        if self.anim_job:
+            root.after_cancel(self.anim_job)
+            self.anim_job = None
+
+    def create_placeholder(self):
+        img = Image.new('RGBA', (50, 50), (0, 0, 0, 0))
+        from PIL import ImageDraw
+        d = ImageDraw.Draw(img)
+        d.ellipse((0,0,50,50), fill='red')
+        tk_img = ImageTk.PhotoImage(img)
+        ACTIONS["idle"] = {"frames": [tk_img], "delay": 200}
+
+    def animate(self):
+        if not self.main_id: return
+
+        # 1. Get Action Data
+        action_name = CURRENT_ACTION
+        
+        # Logic for Left Walk
+        if action_name == "walk" and not self.facing_right and "walk_left" in ACTIONS:
+            action_name = "walk_left"
+
+        data = ACTIONS.get(action_name, ACTIONS.get("idle"))
+        if not data or not data["frames"]: return
+
+        # 2. Cycle Frames
+        frames = data["frames"]
+        self.frame_index = (self.frame_index + 1) % len(frames)
+        img = frames[self.frame_index]
+        
+        self.canvas.itemconfig(self.main_id, image=img)
+        
+        # 3. Dynamic FPS (Delay)
+        delay = data.get("delay", 100) # Default 100ms if missing
+        self.anim_job = root.after(delay, self.animate)
+
+    def set_action(self, name):
+        global CURRENT_ACTION
+        # CRITICAL FIX: Only reset animation if the action is DIFFERENT.
+        # This prevents the "walk" animation from resetting to frame 0 every millisecond.
+        if CURRENT_ACTION != name:
+            if name in ACTIONS or name == "walk_left":
+                CURRENT_ACTION = name
+                self.frame_index = 0
+
+    def walk_to(self, tx, ty):
+        self.target_x = tx
+        self.target_y = ty
+        self.is_moving = True
+        self.move_step()
+
+    def move_step(self):
+        if not self.is_moving or not self.main_id: return
+
+        dx = self.target_x - self.x
+        dy = self.target_y - self.y
+        dist = (dx**2 + dy**2)**0.5
+        speed = 5
+
+        if dist < speed:
+            self.is_moving = False
+            self.set_action("idle")
+            return
+
+        move_x = (dx / dist) * speed
+        move_y = (dy / dist) * speed
+        
+        self.x += move_x
+        self.y += move_y
+        self.canvas.move(self.main_id, move_x, move_y)
+
+        # Direction Logic
+        if move_x > 0: self.facing_right = True
+        elif move_x < 0: self.facing_right = False
+        
+        # Trigger Walk Action (Safe now because of the check in set_action)
+        self.set_action("walk")
+        root.after(20, self.move_step)
+
+    def drag_start(self, e):
+        self.drag_offset = (e.x - self.x, e.y - self.y)
+
+    def drag(self, e):
+        self.x = e.x - self.drag_offset[0]
+        self.y = e.y - self.drag_offset[1]
+        self.canvas.coords(self.main_id, self.x, self.y)
+
+assistant = Assistant(canvas)
+
+# ================= SETTINGS MANAGER =================
+class SettingsWindow:
+    def __init__(self):
+        self.win = tk.Toplevel(root)
+        self.win.title("Settings")
+        self.win.geometry("450x600")
+        self.win.configure(bg="#222")
+
+        # Enable/Disable
+        self.status_var = tk.StringVar(value="Enable Assistant" if not ASSISTANT_ACTIVE else "Disable Assistant")
+        tk.Button(self.win, textvariable=self.status_var, command=self.toggle_active, 
+                  bg="#00ff9d", font=("Arial", 11, "bold")).pack(fill="x", padx=10, pady=10)
+
+        # Action List
+        tk.Label(self.win, text="Select Action to Edit:", bg="#222", fg="white").pack()
+        self.listbox = tk.Listbox(self.win, bg="#333", fg="white", height=6)
+        self.listbox.pack(fill="x", padx=10)
+        self.listbox.bind('<<ListboxSelect>>', self.on_select_action)
+        
+        # Action Buttons
+        frame_btns = tk.Frame(self.win, bg="#222")
+        frame_btns.pack(fill="x", padx=10, pady=5)
+        tk.Button(frame_btns, text="+ New Action", command=self.add_action, bg="#444", fg="white").pack(side="left", fill="x", expand=True)
+        tk.Button(frame_btns, text="Upload Images", command=self.upload_images, bg="#ff006e", fg="white").pack(side="left", fill="x", expand=True)
+        tk.Button(frame_btns, text="Delete", command=self.delete_action, bg="red", fg="white").pack(side="left", fill="x", expand=True)
+
+        # --- FPS CONTROL ---
+        tk.Label(self.win, text="Animation Speed (Lower is Faster):", bg="#222", fg="#00ff9d").pack(pady=(20, 0))
+        self.fps_slider = Scale(self.win, from_=20, to=500, orient="horizontal", bg="#333", fg="white", command=self.update_fps)
+        self.fps_slider.set(100) # Default
+        self.fps_slider.pack(fill="x", padx=20)
+        
+        self.refresh_list()
+
+    def toggle_active(self):
+        global ASSISTANT_ACTIVE
+        ASSISTANT_ACTIVE = not ASSISTANT_ACTIVE
+        if ASSISTANT_ACTIVE:
+            self.status_var.set("Disable Assistant")
+            assistant.enable()
+        else:
+            self.status_var.set("Enable Assistant")
+            assistant.disable()
+
+    def refresh_list(self):
+        self.listbox.delete(0, tk.END)
+        for action in ACTIONS:
+            count = len(ACTIONS[action]["frames"])
+            delay = ACTIONS[action]["delay"]
+            self.listbox.insert(tk.END, f"{action} ({count} frames) [Speed: {delay}ms]")
+
+    def on_select_action(self, event):
+        # Update Slider when user clicks an action
+        sel = self.listbox.curselection()
+        if sel:
+            txt = self.listbox.get(sel[0])
+            name = txt.split(" ")[0]
+            if name in ACTIONS:
+                current_delay = ACTIONS[name]["delay"]
+                self.fps_slider.set(current_delay)
+
+    def update_fps(self, val):
+        # Save Slider value to current action
+        sel = self.listbox.curselection()
+        if sel:
+            txt = self.listbox.get(sel[0])
+            name = txt.split(" ")[0]
+            if name in ACTIONS:
+                ACTIONS[name]["delay"] = int(val)
+                # Refresh list text to show new speed
+                # (Optional optimization: don't full refresh to avoid deselecting)
+
+    def add_action(self):
+        name = simpledialog.askstring("New Action", "Action Name (e.g. run, sleep):")
+        if name:
+            name = name.lower().strip()
+            if name not in ACTIONS:
+                ACTIONS[name] = {"frames": [], "delay": 100}
+                self.refresh_list()
+
+    def delete_action(self):
+        sel = self.listbox.curselection()
+        if sel:
+            name = self.listbox.get(sel[0]).split(" ")[0]
+            if name in ACTIONS:
+                del ACTIONS[name]
+                if name == "walk" and "walk_left" in ACTIONS:
+                    del ACTIONS["walk_left"]
+                self.refresh_list()
+
+    def upload_images(self):
+        sel = self.listbox.curselection()
+        if not sel: return
+        name = self.listbox.get(sel[0]).split(" ")[0]
+
+        paths = filedialog.askopenfilenames(title=f"Images for {name}", filetypes=[("Images", "*.png;*.jpg;*.gif")])
+        if paths:
             frames = []
-            # Look for file_1.png, file_2.png, etc.
-            files = sorted(glob.glob(os.path.join(folder, f"{action_name}_*.png")))
-            if not files: 
-                # Try simple format: action1.png, action2.png
-                files = sorted(glob.glob(os.path.join(folder, f"{action_name}*.png")))
-            
-            for f in files:
+            for p in paths:
                 try:
-                    img = Image.open(f).resize((self.size, self.size), Image.Resampling.NEAREST)
+                    img = Image.open(p).resize((100, 100), Image.Resampling.NEAREST)
                     frames.append(ImageTk.PhotoImage(img))
                 except: pass
             
-            if frames: 
-                self.sprites[action_name] = frames
-                print(f"Loaded {len(frames)} frames for {action_name}")
-
-        # Load all states
-        load_seq("idle")
-        load_seq("left")
-        load_seq("right")
-        load_seq("jump")
-        load_seq("wave")
-        
-        # Switch to image mode if we found sprites
-        if self.sprites["idle"]:
-            self.canvas.delete(self.main_id)
-            self.main_id = self.canvas.create_image(self.x, self.y, image=self.sprites["idle"][0])
-            self.ids = [self.main_id]
-            self.bind_events()
-
-    def bind_events(self):
-        self.canvas.tag_bind(self.main_id, "<Button-1>", self.on_click)
-        self.canvas.tag_bind(self.main_id, "<B1-Motion>", self.on_drag)
-
-    def animate(self):
-        # 1. Get frames for current action
-        frames = self.sprites.get(self.current_action)
-        
-        # 2. Update Image if frames exist
-        if frames:
-            self.frame_index = (self.frame_index + 1) % len(frames)
-            current_img = frames[self.frame_index]
-            self.canvas.itemconfig(self.main_id, image=current_img)
-        
-        # 3. Loop (Speed: 100ms)
-        root.after(100, self.animate)
-
-    def walk_to(self, tx, ty, callback=None):
-        if self.is_moving: return
-        self.is_moving = True
-        
-        def step():
-            dx, dy = 0, 0
-            moved = False
-            speed = 8
+            ACTIONS[name]["frames"] = frames
             
-            # Determine Direction
-            if tx > self.x + speed:
-                dx = speed
-                self.current_action = "right" if self.sprites["right"] else "idle"
-                moved = True
-            elif tx < self.x - speed:
-                dx = -speed
-                self.current_action = "left" if self.sprites["left"] else "idle"
-                moved = True
-            else:
-                # X alignment done, move Y
-                if ty > self.y + speed:
-                    dy = speed
-                    moved = True
-                elif ty < self.y - speed:
-                    dy = -speed
-                    moved = True
-            
-            if moved:
-                self.x += dx
-                self.y += dy
-                self.canvas.move(self.main_id, dx, dy)
-                root.after(20, step)
-            else:
-                self.is_moving = False
-                self.current_action = "idle"
-                if callback: callback()
+            # Auto-Flip for Walk
+            if name == "walk":
+                left_frames = []
+                for p in paths:
+                    try:
+                        img = Image.open(p).resize((100, 100), Image.Resampling.NEAREST)
+                        img = ImageOps.mirror(img)
+                        left_frames.append(ImageTk.PhotoImage(img))
+                    except: pass
+                # Create walk_left with same delay as walk
+                ACTIONS["walk_left"] = {"frames": left_frames, "delay": ACTIONS["walk"]["delay"]}
 
-        step()
+            self.refresh_list()
 
-    def do_action(self, action_name):
-        # Temporarily switch action then go back to idle
-        if action_name in self.sprites and self.sprites[action_name]:
-            self.current_action = action_name
-            # Calculate duration: frames * speed
-            duration = len(self.sprites[action_name]) * 100
-            root.after(duration + 200, lambda: setattr(self, 'current_action', 'idle'))
-        else:
-            bot_msg(f"I don't have images for {action_name}!")
+# ================= CHAT UI =================
+btn_set = tk.Button(root, text="⚙ Settings", command=SettingsWindow, bg="#333", fg="white")
+btn_set.place(x=20, y=20)
 
-    # Standard Dragging
-    def on_click(self, e):
-        if EDIT_MODE:
-            self.drag_start = (e.x, e.y)
-        else:
-            self.do_action("wave") # Wave when clicked!
-
-    def on_drag(self, e):
-        if not EDIT_MODE: return
-        dx = e.x - self.drag_start[0]
-        dy = e.y - self.drag_start[1]
-        self.canvas.move(self.main_id, dx, dy)
-        self.x += dx
-        self.y += dy
-        self.drag_start = (e.x, e.y)
-
-# ================= OBJECTS (Apps) =================
-class SimpleApp:
-    def __init__(self, name, path, x, y):
-        self.path = path
-        self.id = canvas.create_text(x, y, text="📂\n"+name, fill="white", font=("Segoe UI", 10), justify="center")
-        canvas.tag_bind(self.id, "<Button-1>", lambda e: self.open_app())
-        
-        # Keep reference to enable drag later if needed
-        self.drag_data = {"x":0, "y":0}
-        canvas.tag_bind(self.id, "<B1-Motion>", self.on_drag)
-        canvas.tag_bind(self.id, "<Button-1>", self.on_click)
-
-    def open_app(self):
-        if not EDIT_MODE:
-            try: os.startfile(self.path)
-            except: pass
-    
-    def on_click(self, e):
-        self.drag_data["x"] = e.x
-        self.drag_data["y"] = e.y
-
-    def on_drag(self, e):
-        if EDIT_MODE:
-            dx = e.x - self.drag_data["x"]
-            dy = e.y - self.drag_data["y"]
-            canvas.move(self.id, dx, dy)
-            self.drag_data["x"] = e.x
-            self.drag_data["y"] = e.y
-
-def load_apps():
-    desktop = os.path.join(os.environ["USERPROFILE"], "Desktop")
-    cx, cy = 50, 50
-    if os.path.exists(desktop):
-        for f in glob.glob(os.path.join(desktop, "*.lnk"))[:12]:
-            name = os.path.splitext(os.path.basename(f))[0]
-            SimpleApp(name, f, cx, cy)
-            cy += 80
-            if cy > SCREEN_H - 100:
-                cy = 50
-                cx += 80
-
-# ================= CHAT UI (TOGGLEABLE) =================
-chat_visible = True
-
-def toggle_chat():
-    global chat_visible
-    if chat_visible:
-        chat_frame.place_forget()
-        toggle_btn.config(text="💬") # Show bubble icon
-        chat_visible = False
-    else:
-        chat_frame.place(relx=0.75, rely=0.6, relwidth=0.24, relheight=0.35)
-        toggle_btn.config(text="➖") # Show minimize icon
-        chat_visible = True
-
-# Chat Frame
-chat_frame = tk.Frame(root, bg="#14182b", relief="solid", bd=1)
+chat_frame = tk.Frame(root, bg="#14182b")
 chat_frame.place(relx=0.75, rely=0.6, relwidth=0.24, relheight=0.35)
-
-chat_log = scrolledtext.ScrolledText(chat_frame, bg="#14182b", fg="white", height=10)
-chat_log.pack(fill="both", expand=True)
-entry = tk.Entry(chat_frame, bg="#222", fg="white")
+log = scrolledtext.ScrolledText(chat_frame, bg="#111", fg="white", height=10)
+log.pack(fill="both", expand=True)
+entry = tk.Entry(chat_frame, bg="#333", fg="white")
 entry.pack(fill="x")
 
-# Toggle Button (Floating outside frame)
-toggle_btn = tk.Button(root, text="➖", command=toggle_chat, bg="#ff006e", fg="white", font=("bold"))
-toggle_btn.place(relx=0.96, rely=0.56, width=30, height=30)
-
 def bot_msg(txt):
-    if not chat_visible: return # Don't print if hidden (or you could force open)
-    chat_log.insert("end", f"Bot: {txt}\n")
-    chat_log.see("end")
+    log.insert("end", f"Bot: {txt}\n")
+    log.see("end")
 
 def send(e):
-    msg = entry.get().lower()
+    msg = entry.get().strip().lower()
     entry.delete(0, "end")
-    
-    if "exit" in msg: root.destroy()
-    elif "jump" in msg: 
-        bot_msg("Jumping!")
-        assistant.do_action("jump")
-    elif "come here" in msg:
-        bot_msg("Coming...")
-        assistant.walk_to(SCREEN_W//2, SCREEN_H//2)
-    elif "load sprites" in msg:
-        bot_msg("Select your folder...")
-        assistant.load_sprites_from_folder()
-    else: 
-        bot_msg(f"Echo: {msg}")
-
+    if msg == "exit": root.destroy()
+    elif "come" in msg: assistant.walk_to(SCREEN_W//2, SCREEN_H//2)
+    elif msg in ACTIONS: 
+        assistant.set_action(msg)
+        bot_msg(f"Action: {msg}")
+    else: bot_msg("Unknown action")
 entry.bind("<Return>", send)
-
-# ================= EDIT MODE TOGGLE =================
-def toggle_edit_mode():
-    global EDIT_MODE
-    EDIT_MODE = not EDIT_MODE
-    mode_btn.config(bg="#00ff9d" if EDIT_MODE else "#333", text="DONE" if EDIT_MODE else "Customize")
-    bot_msg("Edit Mode " + ("ON" if EDIT_MODE else "OFF"))
-
-mode_btn = tk.Button(root, text="Customize", command=toggle_edit_mode, bg="#333", fg="white")
-mode_btn.place(x=20, y=20)
-
-# ================= RUN =================
-load_apps()
-assistant = AnimatedAssistant(canvas, SCREEN_W//2, SCREEN_H//2)
-bot_msg("Type 'load sprites' to load images!")
-bot_msg("Type 'jump' or 'come here' to test.")
 
 root.mainloop()

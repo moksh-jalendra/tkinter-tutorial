@@ -13,8 +13,7 @@ PATROL_MODE = False
 SELECTED_OBJECT = None
 
 # Data Storage
-# ACTIONS format: {"idle": [PIL_Image1, PIL_Image2], "walk": [...]} 
-# Note: We store raw PIL images now, not PhotoImages, to allow dynamic resizing.
+
 ACTIONS = {}  
 APPS = []
 WALLPAPER_IMG = None 
